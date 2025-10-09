@@ -7,6 +7,8 @@ use std::{fs::File, io::Read, path::PathBuf};
 
 use reqwest::{Certificate, ClientBuilder};
 
+use coserv_rs::discovery::{DiscoveryDocument, DISCOVERY_DOCUMENT_CBOR, DISCOVERY_DOCUMENT_JSON};
+
 #[derive(thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     #[error("configuration error: {0}")]
@@ -372,7 +374,8 @@ pub struct VerificationApi {
 
 /// A builder for Discovery objects
 pub struct DiscoveryBuilder {
-    url: Option<String>,
+    verification_url: Option<String>,
+    coserv_url: Option<String>,
     root_certificate: Option<PathBuf>,
 }
 
@@ -380,7 +383,8 @@ impl DiscoveryBuilder {
     /// default constructor
     pub fn new() -> Self {
         Self {
-            url: None,
+            verification_url: None,
+            coserv_url: None,
             root_certificate: None,
         }
     }
@@ -390,9 +394,13 @@ impl DiscoveryBuilder {
     /// "https://veraison.example/.well-known/veraison/verification".
     /// This hides / encapsulate the details of what the actual URL looks like.
     pub fn with_base_url(mut self, base_url: String) -> DiscoveryBuilder {
-        self.url = Some(format!(
+        self.verification_url = Some(format!(
             "{}{}",
             base_url, "/.well-known/veraison/verification"
+        ));
+        self.coserv_url = Some(format!(
+            "{}{}",
+            base_url, "/.well-known/coserv-configuration"
         ));
         self
     }
@@ -408,8 +416,12 @@ impl DiscoveryBuilder {
 
     /// Instantiate a valid Discovery object, or fail with an error.
     pub fn build(self) -> Result<Discovery, Error> {
-        let url = self
-            .url
+        let verification_url = self
+            .verification_url
+            .ok_or_else(|| Error::ConfigError("missing API endpoint".to_string()))?;
+
+        let coserv_url = self
+            .coserv_url
             .ok_or_else(|| Error::ConfigError("missing API endpoint".to_string()))?;
 
         let mut http_client_builder: ClientBuilder = reqwest::ClientBuilder::new();
@@ -424,7 +436,9 @@ impl DiscoveryBuilder {
         let http_client = http_client_builder.use_rustls_tls().build()?;
 
         Ok(Discovery {
-            verification_url: url::Url::parse(&url)
+            verification_url: url::Url::parse(&verification_url)
+                .map_err(|e| Error::ConfigError(e.to_string()))?,
+            coserv_url: url::Url::parse(&coserv_url)
                 .map_err(|e| Error::ConfigError(e.to_string()))?,
             http_client,
         })
@@ -517,6 +531,7 @@ impl VerificationApi {
 /// Veraison service instance that you are communicating with.
 pub struct Discovery {
     verification_url: url::Url,
+    coserv_url: url::Url,
     http_client: reqwest::Client,
 }
 
@@ -528,11 +543,15 @@ impl Discovery {
         let base_url =
             url::Url::parse(&base_url_str).map_err(|e| Error::ConfigError(e.to_string()))?;
 
-        let mut verification_url = base_url;
+        let mut verification_url = base_url.clone();
         verification_url.set_path(".well-known/veraison/verification");
+
+        let mut coserv_url = base_url.clone();
+        coserv_url.set_path(".well-known/coserv-configuration");
 
         Ok(Discovery {
             verification_url,
+            coserv_url,
             http_client: reqwest::Client::new(),
         })
     }
@@ -550,6 +569,44 @@ impl Discovery {
             reqwest::StatusCode::OK => Ok(response.json::<VerificationApi>().await?),
             _ => Err(Error::ApiError(String::from(
                 "Failed to discover verification endpoint information.",
+            ))),
+        }
+    }
+
+    /// Obtains the capabilities and endpoints of the CoSERV service using JSON format.
+    pub async fn get_coserv_discovery_document_json(&self) -> Result<DiscoveryDocument, Error> {
+        let response = self
+            .http_client
+            .get(self.coserv_url.as_str())
+            .header(reqwest::header::ACCEPT, DISCOVERY_DOCUMENT_JSON)
+            .send()
+            .await?;
+
+        match response.status() {
+            reqwest::StatusCode::OK => Ok(response.json::<DiscoveryDocument>().await?),
+            _ => Err(Error::ApiError(String::from(
+                "Failed to discover CoSERV endpoint information (JSON format).",
+            ))),
+        }
+    }
+
+    /// Obtains the capabilities and endpoints of the CoSERV service using JSON format.
+    pub async fn get_coserv_discovery_document_cbor(&self) -> Result<DiscoveryDocument, Error> {
+        let response = self
+            .http_client
+            .get(self.coserv_url.as_str())
+            .header(reqwest::header::ACCEPT, DISCOVERY_DOCUMENT_CBOR)
+            .send()
+            .await?;
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let dd: Result<DiscoveryDocument, ciborium::de::Error<std::io::Error>> =
+                    ciborium::from_reader(response.bytes().await?.to_vec().as_slice());
+                dd.map_err(|e| Error::ApiError(format!("Failed to parse CBOR data into CoSERV discovery document. Underlying error: {0}", e)))
+            }
+            _ => Err(Error::ApiError(String::from(
+                "Failed to discover CoSERV endpoint information (CBOR format).",
             ))),
         }
     }
@@ -768,5 +825,109 @@ mod tests {
                 .get("newChallengeResponseSession"),
             Some(&String::from("/challenge-response/v1/newSession"))
         );
+    }
+
+    #[async_std::test]
+    async fn discover_coserv_json_ok() {
+        let mock_server = MockServer::start().await;
+
+        // Sample response crafted from CoSERV draft
+        let raw_response = r#"
+            {
+              "version": "1.2.3-beta",
+              "capabilities": [
+                {
+                  "media-type": "application/coserv+cose; profile=\"tag:vendor.com,2025:cc_platform#1.0.0\"",
+                  "artifact-support": [
+                    "source",
+                    "collected"
+                  ]
+                }
+              ],
+              "api-endpoints": {
+                "CoSERVRequestResponse": "/endorsement-distribution/v1/coserv/{query}"
+              },
+              "result-verification-key": [
+                {
+                  "alg": "ES256",
+                  "crv": "P-256",
+                  "kty": "EC",
+                  "x": "usWxHK2PmfnHKwXPS54m0kTcGJ90UiglWiGahtagnv8",
+                  "y": "IBOL-C3BttVivg-lSreASjpkttcsz-1rb7btKLv8EX4",
+                  "kid": "key1"
+                }
+              ]
+            }
+        "#;
+
+        let response =
+            ResponseTemplate::new(200).set_body_raw(raw_response, DISCOVERY_DOCUMENT_JSON);
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/coserv-configuration"))
+            .respond_with(response)
+            .mount(&mock_server)
+            .await;
+
+        let discovery = DiscoveryBuilder::new()
+            .with_base_url(mock_server.uri())
+            .build()
+            .expect("Failed to create Discovery client.");
+
+        let coserv_dd = discovery
+            .get_coserv_discovery_document_json()
+            .await
+            .expect("Failed to get verification endpoint details.");
+
+        // Light testing here - just check the version field
+        // (The CoSERV DiscoveryDocument is not implemented in this crate, so we aren't testing that.)
+        assert_eq!(coserv_dd.version.to_string(), String::from("1.2.3-beta"));
+    }
+
+    #[async_std::test]
+    async fn discover_coserv_cbor_ok() {
+        let mock_server = MockServer::start().await;
+
+        // Sample response crafted from CoSERV draft
+        let raw_response: Vec<u8> = vec![
+            0xbf, 0x01, 0x6a, 0x31, 0x2e, 0x32, 0x2e, 0x33, 0x2d, 0x62, 0x65, 0x74, 0x61, 0x02,
+            0x81, 0xbf, 0x01, 0x78, 0x48, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x74, 0x69,
+            0x6f, 0x6e, 0x2f, 0x63, 0x6f, 0x73, 0x65, 0x72, 0x76, 0x2b, 0x63, 0x6f, 0x73, 0x65,
+            0x3b, 0x20, 0x70, 0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x3d, 0x22, 0x74, 0x61, 0x67,
+            0x3a, 0x76, 0x65, 0x6e, 0x64, 0x6f, 0x72, 0x2e, 0x63, 0x6f, 0x6d, 0x2c, 0x32, 0x30,
+            0x32, 0x35, 0x3a, 0x63, 0x63, 0x5f, 0x70, 0x6c, 0x61, 0x74, 0x66, 0x6f, 0x72, 0x6d,
+            0x23, 0x31, 0x2e, 0x30, 0x2e, 0x30, 0x22, 0x02, 0x82, 0x69, 0x63, 0x6f, 0x6c, 0x6c,
+            0x65, 0x63, 0x74, 0x65, 0x64, 0x66, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0xff, 0x03,
+            0xa1, 0x75, 0x43, 0x6f, 0x53, 0x45, 0x52, 0x56, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
+            0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x78, 0x2b, 0x2f, 0x65, 0x6e,
+            0x64, 0x6f, 0x72, 0x73, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x2d, 0x64, 0x69, 0x73, 0x74,
+            0x72, 0x69, 0x62, 0x75, 0x74, 0x69, 0x6f, 0x6e, 0x2f, 0x76, 0x31, 0x2f, 0x63, 0x6f,
+            0x73, 0x65, 0x72, 0x76, 0x2f, 0x7b, 0x71, 0x75, 0x65, 0x72, 0x79, 0x7d, 0x04, 0x81,
+            0xa6, 0x01, 0x02, 0x02, 0x45, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x03, 0x26, 0x20, 0x01,
+            0x21, 0x44, 0x1a, 0x2b, 0x3c, 0x4d, 0x22, 0x44, 0x5e, 0x6f, 0x7a, 0x8b, 0xff,
+        ];
+
+        let response =
+            ResponseTemplate::new(200).set_body_raw(raw_response, DISCOVERY_DOCUMENT_CBOR);
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/coserv-configuration"))
+            .respond_with(response)
+            .mount(&mock_server)
+            .await;
+
+        let discovery = DiscoveryBuilder::new()
+            .with_base_url(mock_server.uri())
+            .build()
+            .expect("Failed to create Discovery client.");
+
+        let coserv_dd = discovery
+            .get_coserv_discovery_document_cbor()
+            .await
+            .expect("Failed to get verification endpoint details.");
+
+        // Light testing here - just check the version field
+        // (The CoSERV DiscoveryDocument is not implemented in this crate, so we aren't testing that.)
+        assert_eq!(coserv_dd.version.to_string(), String::from("1.2.3-beta"));
     }
 }
