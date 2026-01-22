@@ -131,6 +131,16 @@ pub struct QueryRunner {
 }
 
 impl<'a> QueryRunner {
+    /// Execute a single CoSERV query and return an unsigned result.
+    ///
+    /// On success, the returned [Coserv] object will contain the same query as the input,
+    /// but the results will also be populated based on the data provided by the server.
+    ///
+    /// The semantics of this operation are as defined in the
+    /// [CoSERV IETF Draft](https://www.ietf.org/archive/id/draft-ietf-rats-coserv-02.html#name-execute-query).
+    ///
+    /// It is the caller's responsibility to check that the server supports unsigned CoSERV output.
+    /// To do this, consult the [crate::DiscoveryDocument].
     pub async fn execute_query_unsigned(&self, query: &Coserv<'a>) -> Result<Coserv<'a>, Error> {
         let coserv_b64 = query
             .to_b64_url()
