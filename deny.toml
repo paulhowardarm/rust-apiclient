@@ -110,6 +110,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "OpenSSL",
+    "BlueOak-1.0.0",
     # Unicode-DFS-2016 is superseded by Unicode-3.0
     # See https://opensource.org/license/unicode-inc-license-agreement-data-files-and-software
     "Unicode-DFS-2016",
