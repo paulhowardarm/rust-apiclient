@@ -16,7 +16,9 @@ use url::Url;
 use crate::Error;
 
 const UNSIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cbor";
-const SIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cose";
+
+// TODO(paulhowardarm): Support signed queries
+// const SIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cose";
 
 struct ConciseProblemDetails {
     pub title: String,
@@ -129,11 +131,7 @@ pub struct QueryRunner {
 }
 
 impl<'a> QueryRunner {
-    pub async fn execute_query(
-        &self,
-        query: &Coserv<'a>,
-        signed: bool,
-    ) -> Result<Coserv<'a>, Error> {
+    pub async fn execute_query_unsigned(&self, query: &Coserv<'a>) -> Result<Coserv<'a>, Error> {
         let coserv_b64 = query
             .to_b64_url()
             .map_err(|e| Error::DataConversionError(e.to_string()))?;
@@ -145,17 +143,10 @@ impl<'a> QueryRunner {
 
         // Construct the base media type, which is either "application/coserv+cose"
         // or "application/coserv+cbor" depending on whether the caller is requesting signed data.
-        let mut media_type = if signed {
-            MediaType::new(
-                mediatype::names::APPLICATION,
-                Name::new_unchecked(SIGNED_COSERV_MEDIA_SUBTYPE),
-            )
-        } else {
-            MediaType::new(
-                mediatype::names::APPLICATION,
-                Name::new_unchecked(UNSIGNED_COSERV_MEDIA_SUBTYPE),
-            )
-        };
+        let mut media_type = MediaType::new(
+            mediatype::names::APPLICATION,
+            Name::new_unchecked(UNSIGNED_COSERV_MEDIA_SUBTYPE),
+        );
 
         // Parameterise the base media type with the quoted profile string.
         let mut profile = String::new();
@@ -253,7 +244,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let coserv_out = cr.execute_query(&query, false).await.unwrap();
+        let coserv_out = cr.execute_query_unsigned(&query).await.unwrap();
 
         // Test some characteristics of the result
         // (This is deliberately not exhaustive, because this crate doesn't implement CoSERV deserialisation)
@@ -309,7 +300,7 @@ mod tests {
             .unwrap();
 
         let e = cr
-            .execute_query(&query, false)
+            .execute_query_unsigned(&query)
             .await
             .expect_err("Should have resulted in an error.");
         assert_eq!("API error: Content negotiation failed: The given CoSERV profile is not supported by this server", e.to_string());
