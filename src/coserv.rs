@@ -64,18 +64,16 @@ impl QueryRunnerBuilder {
         }
     }
 
-    /// Use this method to supply the URL of the CoSERV request-response endpoint that will create
-    /// new challenge-response sessions, e.g.:
-    /// "https://veraison.example/endorsement-distribution/v1/coserv".
+    /// Use this method to supply the URL of the CoSERV request-response endpoint, e.g.:
+    /// "https://veraison.example/endorsement-distribution/v1/coserv/{query}".
     pub fn with_request_response_url(mut self, v: String) -> QueryRunnerBuilder {
         self.request_response_url = Some(v);
         self
     }
 
-    /// Use this method to add a custom root certificate.  For example, this can
-    /// be used to connect to a server that has a self-signed certificate which
-    /// is not present in (and does not need to be added to) the system's trust
-    /// anchor store.
+    /// Use this method to add a custom root certificate.  For example, this can be used to connect
+    /// to a server whose certificate is signed by a CA which is not present in (and does not need to be added to)
+    /// the system's trust anchor store.
     pub fn with_root_certificate(mut self, v: PathBuf) -> QueryRunnerBuilder {
         self.root_certificate = Some(v);
         self
@@ -151,21 +149,24 @@ impl<'a> QueryRunner {
             .set("query", coserv_b64)
             .build();
 
-        // Construct the base media type, which is either "application/coserv+cose"
-        // or "application/coserv+cbor" depending on whether the caller is requesting signed data.
+        // Construct the base media type, which is "application/coserv+cbor" for
+        // the case of unsigned results.
         let mut media_type = MediaType::new(
             mediatype::names::APPLICATION,
             Name::new_unchecked(UNSIGNED_COSERV_MEDIA_SUBTYPE),
         );
 
-        // Parameterise the base media type with the quoted profile string.
+        // Parameterise the base media type with the profile string (quoted, for the case of URI-based profiles).
         let mut profile = String::new();
-        profile.push('"');
+
         match &query.profile {
             CoservProfile::Oid(oid) => profile.push_str(&oid.to_string()),
-            CoservProfile::Uri(uri) => profile.push_str(uri),
+            CoservProfile::Uri(uri) => {
+                profile.push('"');
+                profile.push_str(uri);
+                profile.push('"');
+            }
         }
-        profile.push('"');
 
         let value = Value::new(&profile);
 
