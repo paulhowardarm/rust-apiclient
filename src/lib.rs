@@ -5,9 +5,13 @@
 
 use std::{fs::File, io::Read, path::PathBuf};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
 use reqwest::{Certificate, ClientBuilder};
 
 use coserv_rs::discovery::{DiscoveryDocument, DISCOVERY_DOCUMENT_CBOR, DISCOVERY_DOCUMENT_JSON};
+
+pub mod coserv;
 
 #[derive(thiserror::Error, PartialEq, Eq)]
 pub enum Error {
@@ -299,7 +303,7 @@ impl ChallengeResponse {
         match nonce {
             Nonce::Value(val) if !val.is_empty() => {
                 q_params.push_str("nonce=");
-                q_params.push_str(&base64::encode_config(val, base64::URL_SAFE));
+                q_params.push_str(&URL_SAFE_NO_PAD.encode(val));
             }
             Nonce::Size(val) if *val > 0 => {
                 q_params.push_str("nonceSize=");

@@ -1,0 +1,4 @@
+{
+  / title /  -1: "Content negotiation failed",
+  / detail / -2: "The given CoSERV profile is not supported by this server"
+}
