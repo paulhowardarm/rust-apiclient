@@ -23,8 +23,10 @@ pub enum Error {
     CallbackError(String),
     #[error("feature not implemented: {0}")]
     NotImplementedError(String),
-    #[error("Data conversion error: {0}")]
+    #[error("data conversion error: {0}")]
     DataConversionError(String),
+    #[error("signature verification error: {0}")]
+    SignatureVerificationError(String),
 }
 
 // While for other error sources the mapping may be more subtle, all reqwest
@@ -54,7 +56,8 @@ impl std::fmt::Debug for Error {
             | Error::ConfigError(e)
             | Error::ApiError(e)
             | Error::CallbackError(e)
-            | Error::DataConversionError(e) => {
+            | Error::DataConversionError(e)
+            | Error::SignatureVerificationError(e) => {
                 write!(f, "{e}")
             }
         }
