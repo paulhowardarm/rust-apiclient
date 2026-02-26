@@ -23,8 +23,10 @@ pub enum Error {
     CallbackError(String),
     #[error("feature not implemented: {0}")]
     NotImplementedError(String),
-    #[error("Data conversion error: {0}")]
+    #[error("data conversion error: {0}")]
     DataConversionError(String),
+    #[error("signature verification error: {0}")]
+    SignatureVerificationError(String),
 }
 
 // While for other error sources the mapping may be more subtle, all reqwest
@@ -54,7 +56,8 @@ impl std::fmt::Debug for Error {
             | Error::ConfigError(e)
             | Error::ApiError(e)
             | Error::CallbackError(e)
-            | Error::DataConversionError(e) => {
+            | Error::DataConversionError(e)
+            | Error::SignatureVerificationError(e) => {
                 write!(f, "{e}")
             }
         }
@@ -108,9 +111,9 @@ impl ChallengeResponseBuilder {
 
         let mut http_client_builder: ClientBuilder = reqwest::ClientBuilder::new();
 
-        if self.root_certificate.is_some() {
+        if let Some(root_cert) = self.root_certificate {
             let mut buf = Vec::new();
-            File::open(self.root_certificate.unwrap())?.read_to_end(&mut buf)?;
+            File::open(root_cert)?.read_to_end(&mut buf)?;
             let cert = Certificate::from_pem(&buf)?;
             http_client_builder = http_client_builder.add_root_certificate(cert);
         }
@@ -430,9 +433,9 @@ impl DiscoveryBuilder {
 
         let mut http_client_builder: ClientBuilder = reqwest::ClientBuilder::new();
 
-        if self.root_certificate.is_some() {
+        if let Some(root_cert) = self.root_certificate {
             let mut buf = Vec::new();
-            File::open(self.root_certificate.unwrap())?.read_to_end(&mut buf)?;
+            File::open(root_cert)?.read_to_end(&mut buf)?;
             let cert = Certificate::from_pem(&buf)?;
             http_client_builder = http_client_builder.add_root_certificate(cert);
         }

@@ -9,16 +9,14 @@ use ciborium::Value as CborValue;
 use mediatype::{MediaType, Name, Value, WriteParams};
 use reqwest::{Certificate, ClientBuilder};
 
-use coserv_rs::coserv::{Coserv, CoservProfile};
+use coserv_rs::coserv::{corim_rs::CoseVerifier, Coserv, CoservProfile};
 use uritemplate::UriTemplate;
 use url::Url;
 
 use crate::Error;
 
 const UNSIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cbor";
-
-// TODO(paulhowardarm): Support signed queries
-// const SIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cose";
+const SIGNED_COSERV_MEDIA_SUBTYPE: &str = "coserv+cose";
 
 struct ConciseProblemDetails {
     pub title: String,
@@ -99,9 +97,9 @@ impl QueryRunnerBuilder {
 
         let mut http_client_builder: ClientBuilder = reqwest::ClientBuilder::new();
 
-        if self.root_certificate.is_some() {
+        if let Some(root_cert) = self.root_certificate {
             let mut buf = Vec::new();
-            File::open(self.root_certificate.unwrap())?.read_to_end(&mut buf)?;
+            File::open(root_cert)?.read_to_end(&mut buf)?;
             let cert = Certificate::from_pem(&buf)?;
             http_client_builder = http_client_builder.add_root_certificate(cert);
         }
@@ -129,17 +127,7 @@ pub struct QueryRunner {
 }
 
 impl<'a> QueryRunner {
-    /// Execute a single CoSERV query and return an unsigned result.
-    ///
-    /// On success, the returned [Coserv] object will contain the same query as the input,
-    /// but the results will also be populated based on the data provided by the server.
-    ///
-    /// The semantics of this operation are as defined in the
-    /// [CoSERV IETF Draft](https://www.ietf.org/archive/id/draft-ietf-rats-coserv-02.html#name-execute-query).
-    ///
-    /// It is the caller's responsibility to check that the server supports unsigned CoSERV output.
-    /// To do this, consult the [crate::DiscoveryDocument].
-    pub async fn execute_query_unsigned(&self, query: &Coserv<'a>) -> Result<Coserv<'a>, Error> {
+    async fn execute_query(&self, query: &Coserv<'a>, signed: bool) -> Result<Vec<u8>, Error> {
         let coserv_b64 = query
             .to_b64_url()
             .map_err(|e| Error::DataConversionError(e.to_string()))?;
@@ -149,12 +137,15 @@ impl<'a> QueryRunner {
             .set("query", coserv_b64)
             .build();
 
+        let media_subtype = if signed {
+            Name::new_unchecked(SIGNED_COSERV_MEDIA_SUBTYPE)
+        } else {
+            Name::new_unchecked(UNSIGNED_COSERV_MEDIA_SUBTYPE)
+        };
+
         // Construct the base media type, which is "application/coserv+cbor" for
-        // the case of unsigned results.
-        let mut media_type = MediaType::new(
-            mediatype::names::APPLICATION,
-            Name::new_unchecked(UNSIGNED_COSERV_MEDIA_SUBTYPE),
-        );
+        // unsigned results, or "application/coserv+cose" for signed results.
+        let mut media_type = MediaType::new(mediatype::names::APPLICATION, media_subtype);
 
         // Parameterise the base media type with the profile string (quoted, for the case of URI-based profiles).
         let mut profile = String::new();
@@ -190,9 +181,7 @@ impl<'a> QueryRunner {
         match response.status() {
             reqwest::StatusCode::OK => {
                 let response_body_bytes = response.bytes().await?;
-                let coserv_out = Coserv::from_cbor(response_body_bytes.as_ref())
-                    .map_err(|e| Error::DataConversionError(e.to_string()))?;
-                Ok(coserv_out)
+                Ok(response_body_bytes.to_vec())
             }
             // These two are in-protocol errors. If we receive them, they should be accompanied by Concise Problem Details (RFC9290)
             // in the response body.
@@ -210,12 +199,75 @@ impl<'a> QueryRunner {
             n => Err(Error::ApiError(format!("http error status {0}", n))),
         }
     }
+
+    /// Execute a single CoSERV query and return an unsigned result.
+    ///
+    /// On success, the returned [Coserv] object will contain the same query as the input,
+    /// but the results will also be populated based on the data provided by the server.
+    ///
+    /// The semantics of this operation are as defined in the
+    /// [CoSERV IETF Draft](https://www.ietf.org/archive/id/draft-ietf-rats-coserv-02.html#name-execute-query).
+    ///
+    /// It is the caller's responsibility to check that the server supports unsigned CoSERV output.
+    /// To do this, consult the [crate::DiscoveryDocument].
+    pub async fn execute_query_unsigned(&self, query: &Coserv<'a>) -> Result<Coserv<'a>, Error> {
+        let response_bytes = self.execute_query(query, false).await?;
+        let coserv_out = Coserv::from_cbor(response_bytes.as_slice())
+            .map_err(|e| Error::DataConversionError(e.to_string()))?;
+        Ok(coserv_out)
+    }
+
+    /// Execute a single CoSERV query and return a signed result as a vector of bytes.
+    ///
+    /// Verification of the signature, and extraction of the underlying [Coserv] object, are
+    /// the responsibility of the caller. The [Coserv::verify_and_extract] function should be
+    /// used for this purpose, and given an appropriate implementation of the signature
+    /// verifier.
+    ///
+    /// As an alternative to this method, use [QueryRunner::execute_query_signed_extracted] to
+    /// perform the signature verification and extraction in a single operation.
+    ///
+    /// The semantics of this operation are as defined in the
+    /// [CoSERV IETF Draft](https://www.ietf.org/archive/id/draft-ietf-rats-coserv-02.html#name-execute-query).
+    ///
+    /// It is the caller's responsibility to check that the server supports signed CoSERV output.
+    /// To do this, consult the [crate::DiscoveryDocument].
+    pub async fn execute_query_signed(&self, query: &Coserv<'a>) -> Result<Vec<u8>, Error> {
+        let response_bytes = self.execute_query(query, true).await?;
+        Ok(response_bytes)
+    }
+
+    /// Execute a single CoSERV query with a signing and verification.
+    ///
+    /// On success, the returned [Coserv] object will contain the same query as the input,
+    /// but the results will also be populated based on the data provided by the server.
+    /// The signature will have been verified by the supplied implementation of the verifier.
+    ///
+    /// The semantics of this operation are as defined in the
+    /// [CoSERV IETF Draft](https://www.ietf.org/archive/id/draft-ietf-rats-coserv-02.html#name-execute-query).
+    ///
+    /// It is the caller's responsibility to check that the server supports signed CoSERV output.
+    /// To do this, consult the [crate::DiscoveryDocument].
+    pub async fn execute_query_signed_extracted(
+        &self,
+        query: &Coserv<'a>,
+        verifier: &impl CoseVerifier,
+    ) -> Result<Coserv<'a>, Error> {
+        let response_bytes = self.execute_query(query, true).await?;
+        let coserv_out = Coserv::verify_and_extract(verifier, response_bytes.as_slice())
+            .map_err(|e| Error::SignatureVerificationError(e.to_string()))?;
+        Ok(coserv_out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coserv_rs::coserv::{ArtifactTypeChoice, ResultSetTypeChoice, ResultTypeChoice};
+    use coserv_rs::coserv::corim_rs::CorimError;
+    use coserv_rs::coserv::{
+        ArtifactTypeChoice, CoseAlgorithm, CoseKey, CoseKeyOwner, CoseSigner, ResultSetTypeChoice,
+        ResultTypeChoice,
+    };
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -284,6 +336,75 @@ mod tests {
         } else {
             panic!("Wrong type of result set (not reference values).");
         }
+    }
+
+    #[async_std::test]
+    async fn execute_query_signed_extracted_okay() {
+        // Dummy COSE verifier
+        struct TestVerifier {}
+
+        impl CoseKeyOwner for TestVerifier {
+            fn to_cose_key(&self) -> CoseKey {
+                CoseKey::default()
+            }
+        }
+
+        impl CoseVerifier for TestVerifier {
+            fn verify_signature(
+                &self,
+                _alg: CoseAlgorithm,
+                sig: &[u8],
+                _data: &[u8],
+            ) -> Result<(), CorimError> {
+                assert_eq!(sig, [0xde, 0xad, 0xbe, 0xef]);
+                Ok(())
+            }
+        }
+
+        impl CoseSigner for TestVerifier {
+            fn sign(&self, _alg: CoseAlgorithm, _data: &[u8]) -> Result<Vec<u8>, CorimError> {
+                Ok(vec![0xde, 0xad, 0xbe, 0xef])
+            }
+        }
+
+        let verifier = TestVerifier {};
+        let query_bytes = include_bytes!("../test/coserv/example_query.cbor");
+        let query = Coserv::from_cbor(query_bytes.as_slice()).unwrap();
+        let query_string = query.to_b64_url().unwrap();
+
+        let unsigned_result = include_bytes!("../test/coserv/example_result.cbor");
+        let unsigned_coserv = Coserv::from_cbor(unsigned_result.as_slice()).unwrap();
+        let signed_coserv = unsigned_coserv
+            .sign(&verifier, CoseAlgorithm::ES384)
+            .unwrap();
+
+        let mock_server = MockServer::start().await;
+
+        let response = ResponseTemplate::new(200).set_body_bytes(signed_coserv);
+
+        Mock::given(method("GET"))
+            .and(path("/".to_string() + &query_string))
+            .and(header_exists("Accept")) // Ideally we would fully match the header, but WireMock barfs on complex parameterised media types
+            .respond_with(response)
+            .mount(&mock_server)
+            .await;
+
+        let cr = QueryRunnerBuilder::new()
+            .with_request_response_url(mock_server.uri() + "/{query}")
+            .build()
+            .unwrap();
+
+        let coserv_out = cr
+            .execute_query_signed_extracted(&query, &verifier)
+            .await
+            .unwrap();
+
+        // Minimal test that we have a correctly-profiled CoSERV object.
+        // No value in examining its contents here, because that's covered by other tests.
+        assert_eq!(
+            CoservProfile::Uri("tag:example.com,2025:cc-platform#1.0.0".to_string()),
+            coserv_out.profile
+        );
     }
 
     #[async_std::test]
