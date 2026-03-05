@@ -186,7 +186,10 @@ impl QueryRunnerBuilder {
             let mut buf = Vec::new();
             File::open(root_cert)?.read_to_end(&mut buf)?;
             let cert = Certificate::from_pem(&buf)?;
-            http_client_builder = http_client_builder.add_root_certificate(cert);
+            http_client_builder = http_client_builder
+                .add_root_certificate(cert)
+                // It's a custom cert for test environments, so skip validation
+                .tls_danger_accept_invalid_certs(true);
         }
 
         let http_client = http_client_builder.use_rustls_tls().build()?;
